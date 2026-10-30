@@ -1,6 +1,7 @@
 import { type z } from "zod";
 import {
   type FilterCondition,
+  eventsTableCols,
   LISTABLE_SCORE_TYPES,
   type NumericEventsTableColumnId,
   filterAndValidateDbScoreList,
@@ -122,13 +123,15 @@ interface GetEventFilterOptionsParams extends GetObservationsFilterOptionsParams
   filter?: FilterState;
   /**
    * When true, the bulk facet query also returns the approximate total
-   * observation count matching `filter` (`uniq(span_id)` over the same facet
-   * scan) for the traces-table footer "Total ≈ X". The scan honors `filter`
+   * observation count matching `filter` over the same facet scan for the
+   * traces-table footer "Total ≈ X". The aggregate honors `filter`
    * (incl. score filters) but not input/output/comment (dropped upstream, so
    * `omitCounts` → the count is flagged partial) nor full-text search. Set only
    * on the eager bulk request so the count is computed once.
    */
   includeApproxCount?: boolean;
+  /** Exclude each requested event facet's own filters from its counts. */
+  selfExclude?: boolean;
 }
 
 type EventFilterValueOption = {
@@ -699,11 +702,30 @@ export async function getEventFilterOptions(
   );
   const { eventsFilter, traceTimestampFilters, traceScoreTimestampFilters } =
     getEventFilterOptionsScope(scopedParams);
-  const refinedEventsFilter = eventsFilter.concat(participatingFilter);
   const requestedColumns = new Set<EventFilterOptionsColumn>(columns);
   const eventColumns = EVENT_FILTER_OPTION_COLUMNS.filter((column) =>
     requestedColumns.has(column),
   );
+  // Time and embed scopes stay in WHERE; only user filters on requested event
+  // facets move into conditional aggregates so each facet can exclude itself.
+  const selfExcludingFilter: FilterState = [];
+  const sharedFilter: FilterState = [];
+  for (const filter of participatingFilter) {
+    const columnId =
+      eventsTableCols.find(
+        (column) =>
+          column.id === filter.column || column.name === filter.column,
+      )?.id ?? filter.column;
+    if (
+      scopedParams.selfExclude &&
+      eventColumns.some((column) => column === columnId)
+    ) {
+      selfExcludingFilter.push(filter);
+    } else {
+      sharedFilter.push(filter);
+    }
+  }
+  const refinedEventsFilter = eventsFilter.concat(sharedFilter);
   const shouldLoadScoresAvg = requestedColumns.has("scores_avg");
   const shouldLoadScoreCategories = requestedColumns.has("score_categories");
   const shouldLoadScoreBooleans = requestedColumns.has("score_booleans");
@@ -795,9 +817,10 @@ export async function getEventFilterOptions(
           projectId,
           filter: refinedEventsFilter,
           columns: eventColumns,
+          selfExcludingFilter,
           // Only the eager bulk request sets includeApproxCount, so the
           // approximate total is computed once (riding this scan), not per lazy
-          // facet. uniq(span_id) over this scan already honors refinedEventsFilter.
+          // facet. It honors both shared and self-excluding filters.
           includeApproxCount: scopedParams.includeApproxCount,
         })
       : Promise.resolve([]),

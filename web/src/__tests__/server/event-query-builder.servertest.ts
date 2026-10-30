@@ -18,6 +18,67 @@ import {
 } from "@langfuse/shared";
 
 describe("buildEventsFilterOptionsForColumnsQuery", () => {
+  it("self-excludes each facet while counting the full filter in one scan", () => {
+    const built = buildEventsFilterOptionsForColumnsQuery({
+      projectId: "test-project",
+      filter: [],
+      columns: ["name", "environment", "traceTags", "isRootObservation"],
+      selfExcludingFilter: [
+        { column: "Name", type: "string", operator: "=", value: "chosen" },
+        {
+          column: "environment",
+          type: "stringOptions",
+          operator: "none of",
+          value: ["staging"],
+        },
+      ],
+      limit: 1000,
+      includeApproxCount: true,
+    });
+    if (!built) throw new Error("expected query");
+    expect(built.query.match(/FROM events_core e/g)).toHaveLength(1);
+    const select = built.query.split("FROM events_core e")[0];
+    const nameAggregate = select
+      .split(" AS nameTopOptions")[0]
+      .split("\n")
+      .at(-1)!;
+    const environmentAggregate = select
+      .split(" AS environmentTopOptions")[0]
+      .split("\n")
+      .at(-1)!;
+    expect(nameAggregate).toContain("e.environment");
+    expect(nameAggregate).not.toContain("e.name =");
+    expect(environmentAggregate).toContain("e.name =");
+    expect(environmentAggregate).not.toContain("e.environment not in");
+    expect(select).toContain("approx_top_kArrayIf");
+    expect(select).toContain("uniqIf(e.span_id,");
+    expect(
+      built.query.split("FROM events_core e")[1].split("),")[0],
+    ).not.toContain("e.name =");
+    expect(Object.values(built.params)).toContain("chosen");
+    expect(Object.values(built.params)).toContainEqual(["staging"]);
+    expect(built.query).not.toContain("'chosen'");
+  });
+
+  it("rejects self-excluding filters that cannot be evaluated as requested event facets", () => {
+    expect(() =>
+      buildEventsFilterOptionsForColumnsQuery({
+        projectId: "test-project",
+        filter: [],
+        columns: ["name"],
+        limit: 1000,
+        selfExcludingFilter: [
+          {
+            column: "userId",
+            type: "string",
+            operator: "=",
+            value: "fictional-user",
+          },
+        ],
+      }),
+    ).toThrow("Self-excluding filters must target requested event facets");
+  });
+
   it.each([
     ["cachedInputTokens", eventsTableCachedInputTokensSql, "Float64"],
     ["cachedInputCost", eventsTableCachedInputCostSql, "Decimal64(12)"],

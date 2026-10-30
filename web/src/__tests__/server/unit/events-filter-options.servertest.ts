@@ -57,10 +57,11 @@ describe("events.filterOptions applied-filter contract", () => {
     await caller.filterOptions({
       projectId,
       filter,
+      selfExclude: true,
     });
 
     expect(mocks.getEventFilterOptions).toHaveBeenCalledWith(
-      expect.objectContaining({ filter }),
+      expect.objectContaining({ filter, selfExclude: true }),
     );
   });
 

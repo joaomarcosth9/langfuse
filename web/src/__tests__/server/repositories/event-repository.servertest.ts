@@ -45,6 +45,7 @@ import {
   LangfuseNotFoundError,
   type EventsTableFilterState,
   type FilterCondition,
+  type FilterState,
   type TimeFilter,
 } from "@langfuse/shared";
 import waitForExpect from "wait-for-expect";
@@ -1943,6 +1944,186 @@ describe("Clickhouse Events Repository Test", () => {
           { value: "ERROR" },
           { value: "WARNING" },
         ]);
+      });
+    });
+
+    it("matches self-excluded facet queries in one bulk response and keeps the total fully filtered", async () => {
+      const facetProjectId = randomUUID();
+      const traceIds = Array.from({ length: 8 }, () => randomUUID());
+      const startTimeFilter: TimeFilter[] = [
+        {
+          column: "startTime",
+          type: "datetime",
+          operator: ">=",
+          value: new Date(Date.now() - 60_000),
+        },
+      ];
+      const columns = [
+        "name",
+        "experimentId",
+        "traceTags",
+        "isRootObservation",
+        "level",
+      ] as const;
+      const filter: FilterState = [
+        {
+          column: "Name",
+          type: "stringOptions",
+          operator: "any of",
+          value: ["alpha"],
+        },
+        {
+          column: "experimentId",
+          type: "stringOptions",
+          operator: "any of",
+          value: ["exp-a"],
+        },
+        {
+          column: "traceTags",
+          type: "arrayOptions",
+          operator: "any of",
+          value: ["tag-a"],
+        },
+        {
+          column: "isRootObservation",
+          type: "boolean",
+          operator: "=",
+          value: true,
+        },
+        {
+          column: "metadata",
+          type: "stringObject",
+          key: "region",
+          operator: "=",
+          value: "south",
+        },
+      ];
+      await createEventsCh(
+        Array.from({ length: 8 }, (_, i) =>
+          createEvent({
+            project_id: facetProjectId,
+            trace_id: traceIds[i],
+            user_id: i === 7 ? null : "fixture-user",
+            name: i === 1 ? "beta" : "alpha",
+            experiment_id: i === 2 ? "exp-b" : "exp-a",
+            experiment_name: i === 2 ? "Experiment B" : "Experiment A",
+            tags: i === 3 ? ["tag-b"] : ["tag-a", "tag-c"],
+            is_app_root: i !== 4,
+            parent_span_id: i === 4 ? "parent-span" : "",
+            level: i === 5 ? "ERROR" : "DEFAULT",
+            metadata_names: ["region"],
+            metadata_values: [i === 6 ? "north" : "south"],
+          }),
+        ),
+      );
+
+      await createScoresCh([
+        createTraceScore({
+          project_id: facetProjectId,
+          trace_id: traceIds[0],
+          observation_id: null,
+          name: "quality",
+          data_type: "NUMERIC",
+          value: 0.9,
+        }),
+      ]);
+
+      await waitForExpect(async () => {
+        const combined = await getEventFilterOptions({
+          projectId: facetProjectId,
+          startTimeFilter,
+          columns,
+          filter,
+          selfExclude: true,
+          includeApproxCount: true,
+        });
+        expect(combined.approxTotalCount).toBe(3);
+        for (const column of columns) {
+          const separate = await getEventFilterOptions({
+            projectId: facetProjectId,
+            startTimeFilter,
+            columns: [column],
+            filter: filter.filter(
+              (condition) =>
+                (condition.column === "Name" ? "name" : condition.column) !==
+                column,
+            ),
+          });
+          expect(combined[column]).toEqual(separate[column]);
+        }
+        const scoredFilter: FilterState = [
+          ...filter,
+          {
+            column: "scores_avg",
+            type: "numberObject",
+            key: "quality",
+            operator: ">",
+            value: 0.5,
+          },
+        ];
+        const scored = await getEventFilterOptions({
+          projectId: facetProjectId,
+          startTimeFilter,
+          columns,
+          filter: scoredFilter,
+          selfExclude: true,
+          includeApproxCount: true,
+        });
+        expect(scored.approxTotalCount).toBe(1);
+        for (const column of columns) {
+          const separate = await getEventFilterOptions({
+            projectId: facetProjectId,
+            startTimeFilter,
+            columns: [column],
+            filter: scoredFilter.filter(
+              (condition) =>
+                (condition.column === "Name" ? "name" : condition.column) !==
+                column,
+            ),
+          });
+          expect(scored[column]).toEqual(separate[column]);
+        }
+        const nullableFilter: FilterState = [
+          ...filter,
+          {
+            column: "userId",
+            type: "string",
+            operator: "=",
+            value: "fixture-user",
+          },
+        ];
+        const nullable = await getEventFilterOptions({
+          projectId: facetProjectId,
+          startTimeFilter,
+          columns: [...columns, "userId"],
+          filter: nullableFilter,
+          selfExclude: true,
+          includeApproxCount: true,
+        });
+        expect(nullable.approxTotalCount).toBe(2);
+        expect(nullable.level).toEqual([
+          { value: "DEFAULT", count: 1 },
+          { value: "ERROR", count: 1 },
+        ]);
+        const empty = await getEventFilterOptions({
+          projectId: facetProjectId,
+          startTimeFilter,
+          columns,
+          filter: [
+            ...filter,
+            {
+              column: "name",
+              type: "stringOptions",
+              operator: "none of",
+              value: ["alpha"],
+            },
+          ],
+          selfExclude: true,
+          includeApproxCount: true,
+        });
+        expect(empty.approxTotalCount).toBe(0);
+        expect(empty.name?.map((option) => option.value)).toContain("beta");
+        expect(empty.level).toEqual([]);
       });
     });
 

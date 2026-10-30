@@ -4,21 +4,8 @@ import {
   type TimeFilter,
 } from "@langfuse/shared";
 
-// Pure query planning for the events filter options (LFE-14489): which facet
-// columns share one bulk query, which need a self-excluded per-column query,
-// and the refining filter each carries. useEventsFilterOptions executes the plan.
-
-// Score-catalog columns (score names, not per-value counts) always stay in the
-// bulk: the server never refines them, and the search-bar grammar's score-type
-// routing + AI score-name validation must see the full catalog (LFE-10596).
-const UNREFINED_SCORE_CATALOG_COLUMNS: ReadonlySet<string> = new Set([
-  "scores_avg",
-  "score_categories",
-  "score_booleans",
-  "trace_scores_avg",
-  "trace_score_categories",
-  "trace_score_booleans",
-]);
+// Eager facets share a bulk request with server-side self-exclusion. Lazy
+// facets retain individual requests and cache entries.
 
 // Filters can be keyed by column id ("environment") or display name ("User ID",
 // as the embed-scope filters are). Facet columns are always ids — a label that
@@ -53,22 +40,20 @@ export const splitFacetFilter = (
 });
 
 export type FacetQueryPlan<Column extends string = string> = {
-  /** Shared bulk query: clean facets + score catalog, refined by the full
-   *  filter. `columns` undefined = request-all (only valid unfiltered). */
+  /** Shared bulk query: the server self-excludes each requested facet's own
+   *  conditions. `columns` undefined requests every supported facet. */
   bulk: {
     columns: Column[] | undefined;
     filter: FilterState | undefined;
   };
-  /** One query per self-excluded facet — its own condition removed, so its full
-   *  option list survives and the `none of` complement stays computable — plus
-   *  each lazily-requested column. */
+  /** One self-excluded query per lazily-requested column, with its own cache
+   *  entry and no duplicate request for a column already in the bulk. */
   perColumn: { column: Column; filter: FilterState | undefined }[];
 };
 
 /**
- * Partition the requested columns into the bulk and per-column queries, with
- * each query's refining filter. `refiningFilter` must be start-time-free (see
- * `splitFacetFilter`); lazy columns are always per-column (own cache entry each).
+ * Share eager columns in one bulk request and keep lazy columns independently
+ * cached. `refiningFilter` must be start-time-free (see `splitFacetFilter`).
  */
 export function planEventFacetQueries<Column extends string>(params: {
   refiningFilter: FilterState;
@@ -84,27 +69,17 @@ export function planEventFacetQueries<Column extends string>(params: {
     return refined.length > 0 ? refined : undefined;
   };
 
-  // Only facets carrying their own condition would self-collapse in the bulk;
-  // a score condition never evicts its (unrefined) catalog column.
-  const selfFilteredColumns = new Set(
-    refiningFilter
-      .map((f) => resolveEventFacetColumnId(f.column))
-      .filter((c) => !UNREFINED_SCORE_CATALOG_COLUMNS.has(c)),
-  );
-
-  const bulkColumns = eagerColumns?.filter((c) => !selfFilteredColumns.has(c));
-  const dirtyEagerColumns =
-    eagerColumns?.filter((c) => selfFilteredColumns.has(c)) ?? [];
-
-  const perColumn = Array.from(
-    new Set<Column>([...lazyColumns, ...dirtyEagerColumns]),
-  )
+  const eagerColumnSet = new Set(eagerColumns);
+  const perColumn = Array.from(new Set(lazyColumns))
+    .filter(
+      (column) => eagerColumns !== undefined && !eagerColumnSet.has(column),
+    )
     .sort()
     .map((column) => ({ column, filter: filterFor(column) }));
 
   return {
     bulk: {
-      columns: bulkColumns,
+      columns: eagerColumns ? [...eagerColumns] : undefined,
       filter: refiningFilter.length > 0 ? refiningFilter : undefined,
     },
     perColumn,

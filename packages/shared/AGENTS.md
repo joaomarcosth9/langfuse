@@ -28,6 +28,7 @@
   generation in the full thread.
 - Domain model types: `src/domain/*`
 - Repository layer: `src/server/repositories/*`
+  - `getEventsFilterOptionsForColumns` accepts `selfExcludingFilter` for requested event facets. Each conditional aggregate omits its own column predicates; the approximate total retains every predicate. Shared time, embed and score scope stays in `filter`.
 - Billing ledger: the append-only `billable_events` table (created by
   `clickhouse/scripts/dev-tables.sh`, applied by hand on Cloud, not
   migration-managed) read via `src/server/repositories/billable-events.ts`.

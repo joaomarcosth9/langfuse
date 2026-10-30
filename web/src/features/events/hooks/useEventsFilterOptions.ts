@@ -122,19 +122,19 @@ type UseEventsFilterOptionsParams = {
    *  a window move re-keys every query but a filter edit only the refined ones. */
   startTimeFilter?: TimeFilter[];
   /** Active filters the counts refine against (LFE-14489). Pass the SAME state
-   *  that scopes the row query; each facet self-excludes its own column via the
-   *  query plan. Start-time conditions are re-routed into `startTimeFilter`. */
+   *  that scopes the row query; the server self-excludes each eager facet and
+   *  the query plan self-excludes lazy facets. Start-time conditions travel
+   *  through `startTimeFilter`. */
   refiningFilter?: FilterState;
   /**
    * When true, the eager bulk query also returns `approxTotalCount` — the
-   * approximate observation count matching the refined filter, via `uniq(span_id)`
-   * riding the SAME bulk facet scan (its WHERE already applies `refiningFilter`
-   * post-LFE-14489). Set only on the count-bearing table, not per-column.
+   * approximate observation count matching the complete refining filter,
+   * computed alongside the facets in the same scan. Set only on the
+   * count-bearing table, not per-column.
    */
   includeApproxCount?: boolean;
   isRootObservation?: boolean;
-  /** Explicit column subset (non-lazy; ignored when `lazy`). Omit to request
-   *  all — request-all cannot self-exclude, so only valid unfiltered. */
+  /** Explicit column subset (non-lazy; ignored when `lazy`). Omit to request all. */
   columns?: EventFilterOptionColumnsInput;
   /**
    * Lazy mode (v4 events table): request only the eagerly-visible columns up
@@ -227,8 +227,8 @@ export function useEventsFilterOptions({
     [lazyColumnSet],
   );
 
-  // All refinement semantics (self-exclusion, score catalog, id/label
-  // canonicalization) live in the pure plan module.
+  // Eager facets share a scan with server-side self-exclusion; the planner
+  // self-excludes each lazy facet before assigning its own query cache entry.
   const plan = useMemo(
     () =>
       planEventFacetQueries<EventFilterOptionColumn>({
@@ -265,6 +265,7 @@ export function useEventsFilterOptions({
       ...baseInput,
       filter: plan.bulk.filter,
       columns: plan.bulk.columns,
+      selfExclude: true,
       includeApproxCount,
     },
     {
@@ -436,8 +437,8 @@ export function useEventsFilterOptions({
     const pending = new Set<string>(lazyResult.pendingColumns);
     if (isEagerFetching) {
       const data = rawData as Record<string, unknown>;
-      // Only the columns actually in the bulk query — the self-excluded ones
-      // report through lazyResult.pendingColumns instead.
+      // Eager columns report through the bulk; lazy columns report through
+      // lazyResult.pendingColumns.
       for (const column of bulkColumns ?? []) {
         if (data[column] === undefined) pending.add(column);
       }

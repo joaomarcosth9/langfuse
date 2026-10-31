@@ -762,7 +762,6 @@ export default function ObservationsEventsTable({
   const {
     observations,
     canLoadAuxiliaryData,
-    isAuxiliaryDataDeferred,
     totalCount,
     uniqueTraceCount,
     isTotalCountLoading,
@@ -778,9 +777,7 @@ export default function ObservationsEventsTable({
     filterState,
     tableDataScope: {
       projectId,
-      filter:
-        externalFilterState ??
-        filterCore.filterState.concat(embedScopeFilterState),
+      filter: facetRefiningFilter,
       searchQuery,
       searchType,
       timeRange: externalDateRange ?? timeRange,
@@ -829,7 +826,7 @@ export default function ObservationsEventsTable({
     lazy: true,
     // Facet scans wait for the rows so they do not compete with the row query.
     enabled: canLoadAuxiliaryData,
-    deferred: isAuxiliaryDataDeferred,
+    deferred: !canLoadAuxiliaryData,
   });
 
   // Partial scope (over-counts) when the server dropped filters (input/output/comment) or a full-text search is active.

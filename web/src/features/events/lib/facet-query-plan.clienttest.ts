@@ -85,33 +85,26 @@ describe("planEventFacetQueries", () => {
     expect(plan.perColumn).toEqual([]);
   });
 
-  it("pulls a self-filtered facet out of the bulk and self-excludes it", () => {
+  it("keeps a self-filtered facet in the bulk for server-side self-exclusion", () => {
     const plan = planEventFacetQueries({
       refiningFilter: [LEVEL_ERROR],
       eagerColumns: EAGER,
       lazyColumns: [],
     });
-    // `level` would self-collapse under its own condition → own query...
-    expect(plan.bulk.columns).not.toContain("level");
-    expect(plan.bulk.columns).toContain("name");
-    // ...while the remaining bulk facets are refined by it.
+    expect(plan.bulk.columns).toEqual([...EAGER]);
     expect(plan.bulk.filter).toEqual([LEVEL_ERROR]);
-    expect(plan.perColumn).toEqual([{ column: "level", filter: undefined }]);
+    expect(plan.perColumn).toEqual([]);
   });
 
-  it("cross-refines self-excluded facets against each other", () => {
+  it("shares one bulk query across multiple self-filtered eager facets", () => {
     const plan = planEventFacetQueries({
       refiningFilter: [ENV_PROD, LEVEL_ERROR],
       eagerColumns: EAGER,
       lazyColumns: [],
     });
-    expect(plan.bulk.columns).toEqual(["name", "scores_avg"]);
+    expect(plan.bulk.columns).toEqual([...EAGER]);
     expect(plan.bulk.filter).toEqual([ENV_PROD, LEVEL_ERROR]);
-    // environment sees level's condition but not its own — and vice versa.
-    expect(plan.perColumn).toEqual([
-      { column: "environment", filter: [LEVEL_ERROR] },
-      { column: "level", filter: [ENV_PROD] },
-    ]);
+    expect(plan.perColumn).toEqual([]);
   });
 
   it("never evicts the score catalog from the bulk", () => {
@@ -127,16 +120,15 @@ describe("planEventFacetQueries", () => {
     expect(plan.perColumn).toEqual([]);
   });
 
-  it("matches display-name keyed conditions to their facet ids", () => {
+  it("passes display-name keyed conditions to the bulk unchanged", () => {
     const plan = planEventFacetQueries({
       refiningFilter: [ENV_PROD_BY_LABEL],
       eagerColumns: EAGER,
       lazyColumns: [],
     });
-    expect(plan.bulk.columns).not.toContain("environment");
-    expect(plan.perColumn).toEqual([
-      { column: "environment", filter: undefined },
-    ]);
+    expect(plan.bulk.columns).toEqual([...EAGER]);
+    expect(plan.bulk.filter).toEqual([ENV_PROD_BY_LABEL]);
+    expect(plan.perColumn).toEqual([]);
   });
 
   it("refines every facet by an embed-scope condition without evicting the unrequested column", () => {
@@ -152,17 +144,28 @@ describe("planEventFacetQueries", () => {
     expect(plan.perColumn).toEqual([]);
   });
 
-  it("gives lazy columns their own self-excluded queries alongside dirty eager facets", () => {
+  it("keeps lazy columns separately cached and self-excludes their own conditions", () => {
+    const plan = planEventFacetQueries({
+      refiningFilter: [USER_SCOPE_BY_LABEL, ENV_PROD],
+      eagerColumns: EAGER,
+      lazyColumns: ["version", "userId", "environment", "userId"],
+    });
+    expect(plan.bulk.columns).toEqual([...EAGER]);
+    expect(plan.perColumn).toEqual([
+      { column: "userId", filter: [ENV_PROD] },
+      { column: "version", filter: [USER_SCOPE_BY_LABEL, ENV_PROD] },
+    ]);
+  });
+
+  it("supports request-all mode with active filters", () => {
     const plan = planEventFacetQueries({
       refiningFilter: [ENV_PROD],
-      eagerColumns: EAGER,
-      lazyColumns: ["userId", "environment"],
+      eagerColumns: undefined,
+      lazyColumns: ["userId"],
     });
-    // Deduped + sorted: the dirty eager facet and both lazy columns.
-    expect(plan.perColumn).toEqual([
-      { column: "environment", filter: undefined },
-      { column: "userId", filter: [ENV_PROD] },
-    ]);
+    expect(plan.bulk.columns).toBeUndefined();
+    expect(plan.bulk.filter).toEqual([ENV_PROD]);
+    expect(plan.perColumn).toEqual([]);
   });
 
   it("supports request-all mode (columns undefined) for unfiltered callers", () => {

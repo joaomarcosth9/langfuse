@@ -2332,6 +2332,7 @@ const queryEventsFilterOptionsForColumns = async (params: {
   projectId: string;
   filter: FilterState;
   columns: readonly EventFilterOptionColumn[];
+  selfExcludingFilter?: FilterState;
   limit: number;
   scope?: EventFilterOptionScope;
   includeApproxCount?: boolean;
@@ -2340,6 +2341,7 @@ const queryEventsFilterOptionsForColumns = async (params: {
     projectId: params.projectId,
     filter: params.filter,
     columns: params.columns,
+    selfExcludingFilter: params.selfExcludingFilter,
     limit: params.limit,
     scope: params.scope,
     includeApproxCount: params.includeApproxCount,
@@ -2388,6 +2390,7 @@ export const getEventsFilterOptionsForColumns = async (params: {
   projectId: string;
   filter: FilterState;
   columns: readonly EventFilterOptionColumn[];
+  selfExcludingFilter?: FilterState;
   topN?: number;
   scope?: EventFilterOptionScope;
   includeApproxCount?: boolean;

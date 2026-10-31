@@ -360,22 +360,27 @@ const singleColumnOrderBy = (column: EventFilterOptionColumn): string => {
 const optionTopAlias = (column: EventFilterOptionColumn) =>
   `${column}TopOptions`;
 
-const optionTopKSelectExpression = (column: EventFilterOptionColumn) => {
+const optionTopKSelectExpression = (
+  column: EventFilterOptionColumn,
+  condition?: string,
+) => {
   const definition = EVENTS_FILTER_OPTION_DEFINITIONS[column];
+  const conditioned = (expression: string) =>
+    condition ? `(${expression}) AND (${condition})` : expression;
 
   if (definition.kind === "scalar") {
-    return `approx_top_kIf({optionLimit: UInt64})(${stringValueExpression(definition.expression)}, ${definition.includeWhen}) AS ${optionTopAlias(column)}`;
+    return `approx_top_kIf({optionLimit: UInt64})(${stringValueExpression(definition.expression)}, ${conditioned(definition.includeWhen)}) AS ${optionTopAlias(column)}`;
   }
 
   if (definition.kind === "labeledScalar") {
-    return `approx_top_kIf({optionLimit: UInt64})(tuple(${stringValueExpression(definition.expression)}, ${stringValueExpression(definition.labelExpression)}), ${definition.includeWhen}) AS ${optionTopAlias(column)}`;
+    return `approx_top_kIf({optionLimit: UInt64})(tuple(${stringValueExpression(definition.expression)}, ${stringValueExpression(definition.labelExpression)}), ${conditioned(definition.includeWhen)}) AS ${optionTopAlias(column)}`;
   }
 
   if (definition.kind === "boolean") {
-    return `arrayFilter(option -> tupleElement(option, 2) > 0, [tuple('false', countIf(NOT (${definition.expression})), toUInt64(0)), tuple('true', countIf(${definition.expression}), toUInt64(0))]) AS ${optionTopAlias(column)}`;
+    return `arrayFilter(option -> tupleElement(option, 2) > 0, [tuple('false', countIf(${conditioned(`NOT (${definition.expression})`)}), toUInt64(0)), tuple('true', countIf(${conditioned(definition.expression)}), toUInt64(0))]) AS ${optionTopAlias(column)}`;
   }
 
-  return `approx_top_kArray({optionLimit: UInt64})(${optionValuesArrayExpression(definition)}) AS ${optionTopAlias(column)}`;
+  return `approx_top_kArray${condition ? "If" : ""}({optionLimit: UInt64})(${optionValuesArrayExpression(definition)}${condition ? `, ${condition}` : ""}) AS ${optionTopAlias(column)}`;
 };
 
 const optionRowsArrayExpression = (column: EventFilterOptionColumn) => {
@@ -496,9 +501,11 @@ export const buildEventsFilterOptionsForColumnsQuery = (params: {
   projectId: string;
   filter: FilterState;
   columns: readonly EventFilterOptionColumn[];
+  /** Facet refinements: every facet ignores its own conditions, while the total honors all of them. */
+  selfExcludingFilter?: FilterState;
   limit: number;
   scope?: EventFilterOptionScope;
-  // approx total = uniq(span_id) over the bulk scan's full-filter WHERE; re-verify if the scan ever drops predicates
+  // The total honors both the shared scope and every self-excluding refinement.
   includeApproxCount?: boolean;
   sampleRows?: number;
 }): { query: string; params: Record<string, unknown> } | null => {
@@ -518,9 +525,52 @@ export const buildEventsFilterOptionsForColumnsQuery = (params: {
   const sampleRows = params.sampleRows ?? 0;
   const sampled = sampleRows > 0;
 
+  const selfExcludingConditions = (params.selfExcludingFilter ?? []).map(
+    (filter) => {
+      const column =
+        eventsTableCols.find(
+          (candidate) =>
+            candidate.id === filter.column || candidate.name === filter.column,
+        )?.id ?? filter.column;
+      if (!columns.some((requested) => requested === column)) {
+        throw new InvalidRequestError(
+          "Self-excluding filters must target requested event facets",
+        );
+      }
+      const compiled = new FilterList(
+        createFilterFromFilterState(
+          [filter],
+          eventsTableUiColumnDefinitions,
+          eventsTableCols,
+        ),
+      ).apply();
+      if (!compiled.query) {
+        throw new InvalidRequestError(
+          "Self-excluding filters must target requested event facets",
+        );
+      }
+      return { column, ...compiled };
+    },
+  );
+  const refinementCondition = (excludingColumn?: EventFilterOptionColumn) => {
+    const predicates = selfExcludingConditions
+      .filter(({ column }) => column !== excludingColumn)
+      .map(({ query }) => `(${query})`);
+    return predicates.length > 0
+      ? `ifNull(${predicates.join(" AND ")}, 0)`
+      : undefined;
+  };
+  const totalCondition = refinementCondition();
+
   aggregatedOptionsBuilder.selectRaw(
-    ...columns.map(optionTopKSelectExpression),
-    ...(includeApproxTotal ? ["uniq(e.span_id) AS approx_total_count"] : []),
+    ...columns.map((column) =>
+      optionTopKSelectExpression(column, refinementCondition(column)),
+    ),
+    ...(includeApproxTotal
+      ? [
+          `${totalCondition ? `uniqIf(e.span_id, ${totalCondition})` : "uniq(e.span_id)"} AS approx_total_count`,
+        ]
+      : []),
     ...(sampled ? [EVENTS_SAMPLE_FACTOR_SELECT] : []),
   );
   aggregatedOptionsBuilder.sampleRows(sampleRows);
@@ -571,6 +621,10 @@ ORDER BY column ASC, option.sortKey ASC, option.value ASC
     query,
     params: {
       ...aggregatedOptionsParams,
+      ...Object.assign(
+        {},
+        ...selfExcludingConditions.map(({ params }) => params),
+      ),
       optionLimit,
     },
   };

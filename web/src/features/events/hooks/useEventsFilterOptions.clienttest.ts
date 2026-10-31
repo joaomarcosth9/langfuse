@@ -213,22 +213,47 @@ describe("useEventsFilterOptions filtered facet counts (LFE-14489)", () => {
     expect(bulk.filter).toEqual([LEVEL_ERROR]);
   });
 
-  it("executes the query plan: refined bulk + self-excluded per-column queries", () => {
+  it("requests multiple self-filtered eager facets in one bulk query", () => {
     const { bulk, perColumn } = run([ENV_PROD, LEVEL_ERROR]);
 
-    // The self-filtered facets leave the bulk; the rest refine by everything.
-    expect(bulk.columns).not.toContain("environment");
-    expect(bulk.columns).not.toContain("level");
-    expect(bulk.columns).toContain("name");
+    expect(bulk.columns).toEqual(
+      expect.arrayContaining(["environment", "level", "name"]),
+    );
     expect(bulk.filter).toEqual([ENV_PROD, LEVEL_ERROR]);
+    expect(bulk.startTimeFilter).toEqual([START_TIME]);
+    expect(bulk.selfExclude).toBe(true);
+    expect(perColumn).toEqual([]);
+  });
 
-    // Each pulled-out facet gets its own query carrying the OTHER conditions,
-    // and the shared start-time scope.
-    const envQuery = perColumn.find((q) => q.columns?.[0] === "environment");
-    const levelQuery = perColumn.find((q) => q.columns?.[0] === "level");
-    expect(envQuery.filter).toEqual([LEVEL_ERROR]);
-    expect(levelQuery.filter).toEqual([ENV_PROD]);
-    expect(envQuery.startTimeFilter).toEqual([START_TIME]);
+  it("keeps a lazy facet self-excluded in its own query", () => {
+    const userFilter: FilterState[number] = {
+      column: "User ID",
+      type: "string",
+      operator: "=",
+      value: "fictional-user",
+    };
+    const { result } = renderHook(() =>
+      useEventsFilterOptions({
+        projectId: "p",
+        startTimeFilter: [START_TIME],
+        refiningFilter: [ENV_PROD, userFilter],
+        lazy: true,
+      }),
+    );
+
+    act(() => result.current.requestColumns(["userId"]));
+    const userQuery = mocks.perColumnInputs.at(-1);
+    expect(userQuery).toEqual({
+      projectId: "p",
+      startTimeFilter: [START_TIME],
+      filter: [ENV_PROD],
+      columns: ["userId"],
+    });
+    expect(userQuery.selfExclude).toBeUndefined();
+    expect(mocks.bulkInputs.at(-1)).toMatchObject({
+      filter: [ENV_PROD, userFilter],
+      selfExclude: true,
+    });
   });
 
   it("serves tag options alphabetically, whatever order the server sent (LFE-14382)", () => {
